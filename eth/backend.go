@@ -481,7 +481,7 @@ func (s *Ethereum) updateFilterMapsHeads() {
 	for {
 		select {
 		case ev := <-headEventCh:
-			setHead(ev.Header)
+			setHead(ev.Block.Header())
 		case blockProc := <-blockProcCh:
 			s.filterMaps.SetBlockProcessing(blockProc)
 		case <-time.After(time.Second * 10):

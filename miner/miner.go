@@ -30,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -65,15 +66,16 @@ var DefaultConfig = Config{
 // Miner is the main object which takes care of submitting new work to consensus
 // engine and gathering the sealing result.
 type Miner struct {
-	confMu      sync.RWMutex // The lock used to protect the config fields: GasCeil, GasTip and Extradata
-	config      *Config
-	chainConfig *params.ChainConfig
-	engine      consensus.Engine
-	txpool      *txpool.TxPool
-	prio        []common.Address // A list of senders to prioritize
-	chain       *core.BlockChain
-	pending     *pending
-	pendingMu   sync.Mutex // Lock protects the pending block
+	confMu          sync.RWMutex // The lock used to protect the config fields: GasCeil, GasTip and Extradata
+	config          *Config
+	chainConfig     *params.ChainConfig
+	engine          consensus.Engine
+	txpool          *txpool.TxPool
+	prio            []common.Address // A list of senders to prioritize
+	chain           *core.BlockChain
+	pending         *pending
+	pendingMu       sync.Mutex // Lock protects the pending block
+	pendingLogsFeed event.Feed
 }
 
 // New creates a new miner with provided config.
@@ -170,4 +172,10 @@ func (miner *Miner) getPending() *newPayloadResult {
 	}
 	miner.pending.update(header.Hash(), ret)
 	return ret
+}
+
+// SubscribePendingLogs starts delivering logs from pending transactions
+// to the given channel.
+func (miner *Miner) SubscribePendingLogs(ch chan<- []*types.Log) event.Subscription {
+	return miner.pendingLogsFeed.Subscribe(ch)
 }

@@ -262,21 +262,21 @@ func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase
 	}, nil
 }
 
-func (miner *Miner) commitTransaction(env *environment, tx *types.Transaction) error {
+func (miner *Miner) commitTransaction(env *environment, tx *types.Transaction) ([]*types.Log, error) {
 	if tx.Type() == types.BlobTxType {
 		return miner.commitBlobTransaction(env, tx)
 	}
 	receipt, err := miner.applyTransaction(env, tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	env.txs = append(env.txs, tx)
 	env.receipts = append(env.receipts, receipt)
 	env.tcount++
-	return nil
+	return receipt.Logs, nil
 }
 
-func (miner *Miner) commitBlobTransaction(env *environment, tx *types.Transaction) error {
+func (miner *Miner) commitBlobTransaction(env *environment, tx *types.Transaction) ([]*types.Log, error) {
 	sc := tx.BlobTxSidecar()
 	if sc == nil {
 		panic("blob transaction without blobs in miner")
@@ -287,11 +287,11 @@ func (miner *Miner) commitBlobTransaction(env *environment, tx *types.Transactio
 	// tx has too many blobs. So we have to explicitly check it here.
 	maxBlobs := eip4844.MaxBlobsPerBlock(miner.chainConfig, env.header.Time)
 	if env.blobs+len(sc.Blobs) > maxBlobs {
-		return errors.New("max data blobs reached")
+		return nil, errors.New("max data blobs reached")
 	}
 	receipt, err := miner.applyTransaction(env, tx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	env.txs = append(env.txs, tx.WithoutBlobTxSidecar())
 	env.receipts = append(env.receipts, receipt)
@@ -299,7 +299,7 @@ func (miner *Miner) commitBlobTransaction(env *environment, tx *types.Transactio
 	env.blobs += len(sc.Blobs)
 	*env.header.BlobGasUsed += receipt.BlobGasUsed
 	env.tcount++
-	return nil
+	return receipt.Logs, nil
 }
 
 // applyTransaction runs the transaction. If execution fails, state and gas pool are reverted.
@@ -321,6 +321,8 @@ func (miner *Miner) commitTransactions(env *environment, plainTxs, blobTxs *tran
 	if env.gasPool == nil {
 		env.gasPool = new(core.GasPool).AddGas(gasLimit)
 	}
+	var coalescedLogs []*types.Log
+
 	for {
 		// Check interruption signal and abort building if it's fired.
 		if interrupt != nil {
@@ -404,7 +406,7 @@ func (miner *Miner) commitTransactions(env *environment, plainTxs, blobTxs *tran
 		// Start executing the transaction
 		env.state.SetTxContext(tx.Hash(), env.tcount)
 
-		err := miner.commitTransaction(env, tx)
+		logs, err := miner.commitTransaction(env, tx)
 		switch {
 		case errors.Is(err, core.ErrNonceTooLow):
 			// New head notification data race between the transaction pool and miner, shift
@@ -413,6 +415,7 @@ func (miner *Miner) commitTransactions(env *environment, plainTxs, blobTxs *tran
 
 		case errors.Is(err, nil):
 			// Everything ok, collect the logs and shift in the next transaction from the same account
+			coalescedLogs = append(coalescedLogs, logs...)
 			txs.Shift()
 
 		default:
@@ -421,6 +424,21 @@ func (miner *Miner) commitTransactions(env *environment, plainTxs, blobTxs *tran
 			log.Debug("Transaction failed, account skipped", "hash", ltx.Hash, "err", err)
 			txs.Pop()
 		}
+	}
+	if len(coalescedLogs) > 0 {
+		// We don't push the pendingLogsEvent while we are sealing. The reason is that
+		// when we are sealing, the worker will regenerate a sealing block every 3 seconds.
+		// In order to avoid pushing the repeated pendingLog, we disable the pending log pushing.
+
+		// make a copy, the state caches the logs and these logs get "upgraded" from pending to mined
+		// logs by filling in the block hash when the block was mined by the local miner. This can
+		// cause a race condition if a log was "upgraded" before the PendingLogsEvent is processed.
+		cpy := make([]*types.Log, len(coalescedLogs))
+		for i, l := range coalescedLogs {
+			cpy[i] = new(types.Log)
+			*cpy[i] = *l
+		}
+		miner.pendingLogsFeed.Send(cpy)
 	}
 	return nil
 }
